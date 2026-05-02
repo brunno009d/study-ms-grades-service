@@ -20,6 +20,11 @@ class GradesController {
             const categoryData = req.body;
             const userId = req.userId;
 
+            // Validar campos requeridos
+            if (!categoryData.name || categoryData.weight === undefined) {
+                return res.status(400).json({ message: 'Campos requeridos faltantes: name y weight' });
+            }
+
             const newCategory = await gradesService.createCategory(userId, subject_id, categoryData);
             res.status(201).json(newCategory);
         } catch (error) {
@@ -32,6 +37,11 @@ class GradesController {
         try {
             const { subject_id, category_id } = req.params;
             const userId = req.userId;
+
+            // Validar campos requeridos
+            if (!req.body.name || req.body.grade === undefined || req.body.weight === undefined) {
+                return res.status(400).json({ message: 'Campos requeridos faltantes: name, grade y weight' });
+            }
 
             // Combinamos los datos del body con el ID de la categoría de la ruta
             const evaluationData = {
@@ -81,7 +91,7 @@ class GradesController {
             const userId = req.userId;
 
             await gradesService.deleteCategory(userId, subject_id, id);
-            res.status(200).json({ message: 'Categoría eliminada correctamente' });
+            res.status(204).send();
         } catch (error) {
             console.error('Error in deleteCategory:', error);
             res.status(error.statusCode || 500).json({ message: error.message || 'Internal Server Error' });
@@ -94,7 +104,7 @@ class GradesController {
             const userId = req.userId;
 
             await gradesService.deleteEvaluation(userId, subject_id, id);
-            res.status(200).json({ message: 'Evaluación eliminada correctamente' });
+            res.status(204).send();
         } catch (error) {
             console.error('Error in deleteEvaluation:', error);
             res.status(error.statusCode || 500).json({ message: error.message || 'Internal Server Error' });
