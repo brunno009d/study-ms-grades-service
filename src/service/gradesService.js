@@ -145,7 +145,7 @@ class GradesService {
         if (updateData.weight !== undefined) {
             const currentCat = await gradesRepository.getCategoryById(categoryId);
             const parentId = updateData.parent_category_id !== undefined ? updateData.parent_category_id : currentCat.parent_category_id;
-            
+
             const currentSum = await gradesRepository.getSumWeightsCategories(subjectId, parentId, categoryId);
             if (currentSum + parseFloat(updateData.weight) > 1.0) {
                 const error = new Error('Validación fallida: La suma de las ponderaciones en este nivel superaría el 100%');
@@ -237,6 +237,62 @@ class GradesService {
         rootNodes.forEach(root => this._calculateNodeAverage(root));
 
         return rootNodes;
+    }
+
+    // --- Métodos para el contexto de la IA (solo lectura) ---
+
+    // Obtiene el rendimiento académico de TODAS las materias del estudiante.
+    async getAllPerformance(userId) {
+        return await this._getPerformanceByFilter(userId);
+    }
+
+    // Obtiene el rendimiento académico SOLO de las materias "cursando".
+    async getCurrentPerformance(userId) {
+        return await this._getPerformanceByFilter(userId, 'cursando');
+    }
+
+    // Método interno que obtiene rendimiento filtrado opcionalmente por status.
+    async _getPerformanceByFilter(userId, statusFilter = null) {
+        const supabase = require('../config/supabase');
+
+        // Obtiene materias del estudiante con nombre y código
+        let dbQuery = supabase
+            .from('student_subjects')
+            .select('subject_id, status, subjects(name, code)')
+            .eq('student_id', userId);
+
+        if (statusFilter) {
+            dbQuery = dbQuery.eq('status', statusFilter);
+        }
+
+        const { data: studentSubjects, error } = await dbQuery;
+        if (error) throw error;
+        if (!studentSubjects || studentSubjects.length === 0) return [];
+
+        const results = [];
+        for (const ss of studentSubjects) {
+            try {
+                const performance = await this.getSubjectPerformance(userId, ss.subject_id);
+                results.push({
+                    subject_name: ss.subjects?.name || null,
+                    subject_code: ss.subjects?.code || null,
+                    status: ss.status,
+                    ...performance
+                });
+            } catch (err) {
+                // Si falla una materia, la incluimos con datos básicos
+                results.push({
+                    subject_id: ss.subject_id,
+                    subject_name: ss.subjects?.name || null,
+                    subject_code: ss.subjects?.code || null,
+                    status: ss.status,
+                    summary: null,
+                    structure: []
+                });
+            }
+        }
+
+        return results;
     }
 
     _calculateNodeAverage(node) {
