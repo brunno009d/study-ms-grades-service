@@ -110,6 +110,25 @@ class GradesController {
             res.status(error.statusCode || 500).json({ message: error.message || 'Internal Server Error' });
         }
     }
+
+    async getCurrentProgress(req, res) {
+        try {
+            const userId = req.userId;
+            const currentPerformance = await gradesService.getCurrentPerformance(userId);
+
+            // Mapear los datos a un formato simple y limpio para el gráfico del frontend
+            const progressData = currentPerformance.map(subject => ({
+                subject_code: subject.subject_code,
+                subject_name: subject.subject_name,
+                average: subject.summary ? subject.summary.real_average : 1.0
+            }));
+
+            res.status(200).json(progressData);
+        } catch (error) {
+            console.error('Error in getCurrentProgress:', error);
+            res.status(error.statusCode || 500).json({ message: error.message || 'Internal Server Error' });
+        }
+    }
 }
 
 module.exports = new GradesController();
