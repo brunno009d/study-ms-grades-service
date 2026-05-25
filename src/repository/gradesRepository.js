@@ -149,7 +149,7 @@ class GradesRepository {
 
         return data.reduce((sum, item) => {
             // exlucye la evaluacion que se esta actualizando
-            if (excludeEvaluationId && item.id === excludeEvaluationId) return sum;
+            if (excludeEvaluationId && item.id === parseInt(excludeEvaluationId)) return sum;
             return sum + (parseFloat(item.weight) || 0);
         }, 0);
     }
