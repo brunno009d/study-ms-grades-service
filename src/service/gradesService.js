@@ -1,4 +1,5 @@
-const gradesRepository = require('../repository/gradesRepository');
+import gradesRepository from '../repository/gradesRepository.js'
+import supabase from '../config/supabase.js'
 
 class GradesService {
 
@@ -253,8 +254,6 @@ class GradesService {
 
     // Método interno que obtiene rendimiento filtrado opcionalmente por status.
     async _getPerformanceByFilter(userId, statusFilter = null) {
-        const supabase = require('../config/supabase');
-
         // Obtiene materias del estudiante con nombre y código
         let dbQuery = supabase
             .from('student_subjects')
@@ -351,4 +350,4 @@ class GradesService {
     }
 }
 
-module.exports = new GradesService();
+export default new GradesService()
