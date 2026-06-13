@@ -20,7 +20,10 @@ const mockChain = (finalValue) => {
   return chain
 }
 
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+})
 
 // ─── getCategoriesBySubject ────────────────────────────────────────────────
 
