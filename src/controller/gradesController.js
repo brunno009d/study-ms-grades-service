@@ -1,4 +1,4 @@
-const gradesService = require('../service/gradesService');
+import gradesService from '../service/gradesService.js'
 
 class GradesController {
     async getPerformance(req, res) {
@@ -131,4 +131,4 @@ class GradesController {
     }
 }
 
-module.exports = new GradesController();
+export default new GradesController()

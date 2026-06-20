@@ -1,4 +1,4 @@
-const supabase = require('../config/supabase');
+import supabase from '../config/supabase.js'
 
 class GradesRepository {
     // obtiene todas las categorias de un ramo
@@ -172,4 +172,4 @@ class GradesRepository {
     }
 }
 
-module.exports = new GradesRepository();
+export default new GradesRepository()

@@ -1,4 +1,4 @@
-const gradesService = require('../service/gradesService');
+import gradesService from '../service/gradesService.js'
 
 // Endpoints para el contexto de la IA.
 
@@ -23,4 +23,4 @@ const getCurrentContext = async (req, res, next) => {
     }
 };
 
-module.exports = { getContext, getCurrentContext };
+export { getContext, getCurrentContext }
