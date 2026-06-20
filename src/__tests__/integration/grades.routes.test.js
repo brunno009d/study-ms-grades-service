@@ -1,148 +1,497 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 
-// ─── Mock supabase (requireAuth) ──────────────────────────────────────────────
-const mockSb = vi.hoisted(() => ({ auth: { getUser: vi.fn() } }))
-vi.mock('../../config/supabase.js', () => ({ default: mockSb }))
-
-// ─── Mock servicio ────────────────────────────────────────────────────────────
-vi.mock('../../service/gradesService.js', () => ({
-  default: {
-    getSubjectPerformance:  vi.fn(),
-    createCategory:         vi.fn(),
-    updateCategory:         vi.fn(),
-    deleteCategory:         vi.fn(),
-    createEvaluation:       vi.fn(),
-    updateEvaluation:       vi.fn(),
-    deleteEvaluation:       vi.fn(),
-    getCurrentPerformance:  vi.fn(),   // nombre real del método en el controller
-  }
+// ─── Mock Supabase — única dependencia externa ────────────────────────────────
+// Solo se mockea el cliente de Supabase. Todo el código real de
+// controller → service → repository se ejecuta sin cambios.
+const mockSb = vi.hoisted(() => ({
+  auth: { getUser: vi.fn() },
+  from: vi.fn(),
 }))
 
-import gradesService from '../../service/gradesService.js'
+vi.mock('../../config/supabase.js', () => ({ default: mockSb }))
+
 import app from '../../app.js'
 
-const AUTH = { Authorization: 'Bearer test-token' }
+const TOKEN = 'Bearer test-token'
+const USER_ID = 'test-user-id'
+
+// ─── Helper reutilizable ──────────────────────────────────────────────────────
+
+// Simula checkSubjectOwnership: select('id').eq().eq().maybeSingle()
+function makeOwnershipMock(owned = true) {
+  const maybeSingle = vi.fn().mockResolvedValue({
+    data: owned ? { id: 1 } : null,
+    error: null,
+  })
+  return {
+    select: vi.fn().mockReturnValue({
+      eq: vi.fn().mockReturnValue({
+        eq: vi.fn().mockReturnValue({ maybeSingle }),
+      }),
+    }),
+  }
+}
 
 beforeEach(() => {
   vi.clearAllMocks()
   vi.spyOn(console, 'error').mockImplementation(() => {})
-  mockSb.auth.getUser.mockResolvedValue({ data: { user: { id: 'test-user-id' } }, error: null })
+  mockSb.auth.getUser.mockResolvedValue({
+    data: { user: { id: USER_ID } }, error: null,
+  })
 })
 
 // ─── requireAuth ──────────────────────────────────────────────────────────────
 
-describe('requireAuth — rutas protegidas', () => {
-  it('retorna 401 sin header de autorización', async () => {
-    const res = await request(app).get('/performance/1')
+describe('requireAuth — middleware', () => {
+  it('401 — sin header de autorización: ningún repository se ejecuta', async () => {
+    const res = await request(app).get('/performance/7')
     expect(res.status).toBe(401)
     expect(res.body).toHaveProperty('error', 'unauthorized')
+    expect(mockSb.from).not.toHaveBeenCalled()
   })
 
-  it('retorna 401 con token inválido', async () => {
+  it('401 — token inválido: Supabase auth rechaza, nada más se ejecuta', async () => {
     mockSb.auth.getUser.mockResolvedValue({ data: { user: null }, error: new Error('Token inválido') })
-    const res = await request(app).get('/performance/1').set(AUTH)
+    const res = await request(app).get('/performance/7').set('Authorization', TOKEN)
     expect(res.status).toBe(401)
+    expect(mockSb.from).not.toHaveBeenCalled()
   })
 })
 
 // ─── GET /performance/:subject_id ─────────────────────────────────────────────
 
 describe('GET /performance/:subject_id', () => {
-  it('retorna 200 con el rendimiento del ramo', async () => {
+  it('200 — con evaluaciones: controller → service → 3 repositories → Supabase', async () => {
     // Arrange
-    gradesService.getSubjectPerformance.mockResolvedValue({ subject_id: 7, average: 5.5, categories: [] })
+    const categories = [
+      { id: 1, subject_id: '7', name: 'Pruebas', weight: 1.0, parent_category_id: null },
+    ]
+    const evaluations = [
+      { id: 10, category_id: 1, grade: 5.0, weight: 1.0, is_simulation: false },
+    ]
+
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') return makeOwnershipMock(true)
+      if (table === 'evaluation_categories') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({ data: categories, error: null }),
+            }),
+          }),
+        }
+      }
+      if (table === 'evaluation') {
+        return {
+          select: vi.fn().mockReturnValue({
+            in: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({ data: evaluations, error: null }),
+            }),
+          }),
+        }
+      }
+    })
+
     // Act
-    const res = await request(app).get('/performance/7').set(AUTH)
-    // Assert — subject_id llega como string desde los params (sin parseInt en el controller)
+    const res = await request(app).get('/performance/7').set('Authorization', TOKEN)
+
+    // Assert — service calculó el promedio real con los datos de Supabase
     expect(res.status).toBe(200)
-    expect(gradesService.getSubjectPerformance).toHaveBeenCalledWith('test-user-id', '7')
+    expect(res.body).toMatchObject({ subject_id: '7' })
+    expect(res.body.summary.real_average).toBe(5.0)
+    expect(mockSb.from).toHaveBeenCalledWith('student_subjects')
+    expect(mockSb.from).toHaveBeenCalledWith('evaluation_categories')
+    expect(mockSb.from).toHaveBeenCalledWith('evaluation')
   })
 
-  it('retorna 403 cuando el ramo no pertenece al usuario', async () => {
-    const err = new Error('No autorizado')
-    err.statusCode = 403
-    gradesService.getSubjectPerformance.mockRejectedValue(err)
-    const res = await request(app).get('/performance/7').set(AUTH)
+  it('200 — sin categorías: service devuelve estructura vacía sin consultar evaluaciones', async () => {
+    // Arrange
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') return makeOwnershipMock(true)
+      if (table === 'evaluation_categories') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({ data: [], error: null }),
+            }),
+          }),
+        }
+      }
+    })
+
+    // Act
+    const res = await request(app).get('/performance/7').set('Authorization', TOKEN)
+
+    // Assert — sin categorías no debe consultar la tabla de evaluaciones
+    expect(res.status).toBe(200)
+    expect(res.body.summary.real_average).toBe(0)
+    expect(res.body.structure).toHaveLength(0)
+    expect(mockSb.from).not.toHaveBeenCalledWith('evaluation')
+  })
+
+  it('403 — usuario no es dueño: service lanza error antes del repository de categorías', async () => {
+    // Arrange
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') return makeOwnershipMock(false)
+    })
+
+    // Act
+    const res = await request(app).get('/performance/7').set('Authorization', TOKEN)
+
+    // Assert
     expect(res.status).toBe(403)
+    expect(mockSb.from).not.toHaveBeenCalledWith('evaluation_categories')
   })
 })
 
 // ─── POST /subjects/:subject_id/categories ────────────────────────────────────
 
 describe('POST /subjects/:subject_id/categories', () => {
-  it('retorna 400 cuando faltan campos obligatorios', async () => {
+  it('400 — controller rechaza body sin campos obligatorios antes de llamar al service', async () => {
+    // Act: falta name
     const res = await request(app)
       .post('/subjects/7/categories')
-      .set(AUTH)
-      .send({ weight: 0.3 })                  // falta name
+      .set('Authorization', TOKEN)
+      .send({ weight: 0.3 })
+
     expect(res.status).toBe(400)
+    expect(mockSb.from).not.toHaveBeenCalled()
   })
 
-  it('retorna 201 al crear la categoría correctamente', async () => {
-    // Arrange
-    gradesService.createCategory.mockResolvedValue({ id: 1, name: 'Tareas', weight: 0.3 })
+  it('201 — ownership + peso disponible: service persiste la categoría en Supabase', async () => {
+    // Arrange: owned, sin categorías existentes (sum=0), insert exitoso
+    const created = { id: 5, name: 'Tareas', weight: 0.3, subject_id: '7' }
+    let evalCatCallCount = 0
+
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') return makeOwnershipMock(true)
+      if (table === 'evaluation_categories') {
+        evalCatCallCount++
+        if (evalCatCallCount === 1) {
+          // getSumWeightsCategories: select.eq.is → array de pesos existentes
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                is: vi.fn().mockResolvedValue({ data: [], error: null }),
+              }),
+            }),
+          }
+        }
+        // createCategory: insert.select.single
+        const single = vi.fn().mockResolvedValue({ data: created, error: null })
+        return {
+          insert: vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnValue({ single }),
+          }),
+        }
+      }
+    })
+
     // Act
     const res = await request(app)
       .post('/subjects/7/categories')
-      .set(AUTH)
+      .set('Authorization', TOKEN)
       .send({ name: 'Tareas', weight: 0.3 })
-    // Assert — el controller pasa el body completo como tercer arg, subject_id como string
+
+    // Assert — los 3 pasos del service llegaron a Supabase
     expect(res.status).toBe(201)
-    expect(gradesService.createCategory).toHaveBeenCalledWith(
-      'test-user-id', '7', expect.objectContaining({ name: 'Tareas', weight: 0.3 })
-    )
+    expect(res.body).toMatchObject({ name: 'Tareas', weight: 0.3 })
+    expect(mockSb.from).toHaveBeenCalledWith('student_subjects')
+    expect(mockSb.from).toHaveBeenCalledWith('evaluation_categories')
+  })
+
+  it('400 — service rechaza cuando el peso supera el 100% con las categorías existentes', async () => {
+    // Arrange: owned, peso existente 0.8, intento agregar 0.3 → 1.1 > 1.0
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') return makeOwnershipMock(true)
+      if (table === 'evaluation_categories') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              is: vi.fn().mockResolvedValue({ data: [{ id: 1, weight: 0.8 }], error: null }),
+            }),
+          }),
+        }
+      }
+    })
+
+    // Act
+    const res = await request(app)
+      .post('/subjects/7/categories')
+      .set('Authorization', TOKEN)
+      .send({ name: 'Tarea', weight: 0.3 })
+
+    expect(res.status).toBe(400)
+  })
+})
+
+// ─── PATCH /subjects/:subject_id/categories/:id ───────────────────────────────
+
+describe('PATCH /subjects/:subject_id/categories/:id', () => {
+  it('200 — update sin cambio de peso: service valida ownership y llama update en Supabase', async () => {
+    // Arrange: solo actualiza name, sin peso → omite la validación de suma de pesos
+    const updated = { id: 3, name: 'Exámenes Parciales', weight: 0.5 }
+    const single = vi.fn().mockResolvedValue({ data: updated, error: null })
+
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') return makeOwnershipMock(true)
+      if (table === 'evaluation_categories') {
+        return {
+          update: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({ single }),
+            }),
+          }),
+        }
+      }
+    })
+
+    // Act
+    const res = await request(app)
+      .patch('/subjects/7/categories/3')
+      .set('Authorization', TOKEN)
+      .send({ name: 'Exámenes Parciales' })
+
+    // Assert
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ name: 'Exámenes Parciales' })
+    expect(mockSb.from).toHaveBeenCalledWith('evaluation_categories')
+    expect(single).toHaveBeenCalled()
   })
 })
 
 // ─── DELETE /subjects/:subject_id/categories/:id ──────────────────────────────
 
 describe('DELETE /subjects/:subject_id/categories/:id', () => {
-  it('retorna 204 al eliminar correctamente', async () => {
-    gradesService.deleteCategory.mockResolvedValue({ deleted: true })
-    const res = await request(app).delete('/subjects/7/categories/3').set(AUTH)
-    // Los params siempre son strings cuando no hay parseInt en el controller
+  it('204 — service valida ownership y repository elimina en Supabase', async () => {
+    // Arrange
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') return makeOwnershipMock(true)
+      if (table === 'evaluation_categories') {
+        return {
+          delete: vi.fn().mockReturnValue({
+            eq: vi.fn().mockResolvedValue({ error: null }),
+          }),
+        }
+      }
+    })
+
+    // Act
+    const res = await request(app).delete('/subjects/7/categories/3').set('Authorization', TOKEN)
+
+    // Assert
     expect(res.status).toBe(204)
-    expect(gradesService.deleteCategory).toHaveBeenCalledWith('test-user-id', '7', '3')
+    expect(mockSb.from).toHaveBeenCalledWith('student_subjects')
+    expect(mockSb.from).toHaveBeenCalledWith('evaluation_categories')
+  })
+
+  it('403 — usuario no es dueño: delete no llega al repository de categorías', async () => {
+    // Arrange
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') return makeOwnershipMock(false)
+    })
+
+    // Act
+    const res = await request(app).delete('/subjects/7/categories/3').set('Authorization', TOKEN)
+
+    // Assert
+    expect(res.status).toBe(403)
+    expect(mockSb.from).not.toHaveBeenCalledWith('evaluation_categories')
   })
 })
 
 // ─── POST /subjects/:subject_id/categories/:category_id/evaluations ───────────
 
 describe('POST /subjects/:subject_id/categories/:category_id/evaluations', () => {
-  it('retorna 400 cuando faltan campos obligatorios', async () => {
+  it('400 — controller rechaza body sin campos obligatorios antes de llamar al service', async () => {
+    // Act: falta grade y weight
     const res = await request(app)
       .post('/subjects/7/categories/3/evaluations')
-      .set(AUTH)
-      .send({ name: 'Prueba 1' })              // falta grade y weight
+      .set('Authorization', TOKEN)
+      .send({ name: 'Prueba 1' })
+
     expect(res.status).toBe(400)
+    expect(mockSb.from).not.toHaveBeenCalled()
   })
 
-  it('retorna 201 al registrar la evaluación', async () => {
-    gradesService.createEvaluation.mockResolvedValue({ id: 10, name: 'Prueba 1', grade: 6.0 })
+  it('201 — flujo completo: ownership + peso disponible + insert en Supabase', async () => {
+    // Arrange
+    const created = { id: 10, name: 'Prueba 1', grade: 6.0, weight: 0.5, category_id: 3 }
+    let evalCallCount = 0
+
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') return makeOwnershipMock(true)
+      if (table === 'evaluation') {
+        evalCallCount++
+        if (evalCallCount === 1) {
+          // getSumWeightsEvaluations: select.eq → array de pesos existentes
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockResolvedValue({ data: [], error: null }),
+            }),
+          }
+        }
+        // createEvaluation: insert.select.single
+        const single = vi.fn().mockResolvedValue({ data: created, error: null })
+        return {
+          insert: vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnValue({ single }),
+          }),
+        }
+      }
+    })
+
+    // Act
     const res = await request(app)
       .post('/subjects/7/categories/3/evaluations')
-      .set(AUTH)
+      .set('Authorization', TOKEN)
       .send({ name: 'Prueba 1', grade: 6.0, weight: 0.5, is_simulation: false })
-    // subject_id llega como string; category_id se convierte a int dentro del body
+
+    // Assert — controller convirtió category_id a int: parseInt('3') = 3
     expect(res.status).toBe(201)
-    expect(gradesService.createEvaluation).toHaveBeenCalledWith(
-      'test-user-id', '7', expect.objectContaining({ name: 'Prueba 1', category_id: 3 })
-    )
+    expect(res.body).toMatchObject({ name: 'Prueba 1', grade: 6.0 })
+    expect(mockSb.from).toHaveBeenCalledWith('student_subjects')
+    expect(mockSb.from).toHaveBeenCalledWith('evaluation')
+  })
+})
+
+// ─── PATCH /subjects/:subject_id/evaluations/:id ─────────────────────────────
+
+describe('PATCH /subjects/:subject_id/evaluations/:id', () => {
+  it('200 — update sin cambio de nota ni peso: service valida ownership y actualiza en Supabase', async () => {
+    // Arrange: solo actualiza name → omite validaciones de grade y weight
+    const updated = { id: 10, name: 'Prueba Final', grade: 6.0, weight: 0.5 }
+    const single = vi.fn().mockResolvedValue({ data: updated, error: null })
+
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') return makeOwnershipMock(true)
+      if (table === 'evaluation') {
+        return {
+          update: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({ single }),
+            }),
+          }),
+        }
+      }
+    })
+
+    // Act
+    const res = await request(app)
+      .patch('/subjects/7/evaluations/10')
+      .set('Authorization', TOKEN)
+      .send({ name: 'Prueba Final' })
+
+    // Assert
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ name: 'Prueba Final' })
+    expect(single).toHaveBeenCalled()
+  })
+})
+
+// ─── DELETE /subjects/:subject_id/evaluations/:id ────────────────────────────
+
+describe('DELETE /subjects/:subject_id/evaluations/:id', () => {
+  it('204 — service valida ownership y repository elimina la evaluación de Supabase', async () => {
+    // Arrange
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') return makeOwnershipMock(true)
+      if (table === 'evaluation') {
+        return {
+          delete: vi.fn().mockReturnValue({
+            eq: vi.fn().mockResolvedValue({ error: null }),
+          }),
+        }
+      }
+    })
+
+    // Act
+    const res = await request(app).delete('/subjects/7/evaluations/10').set('Authorization', TOKEN)
+
+    // Assert
+    expect(res.status).toBe(204)
+    expect(mockSb.from).toHaveBeenCalledWith('student_subjects')
+    expect(mockSb.from).toHaveBeenCalledWith('evaluation')
   })
 })
 
 // ─── GET /dashboard/current-progress ─────────────────────────────────────────
 
 describe('GET /dashboard/current-progress', () => {
-  it('retorna 200 con el progreso actual del estudiante', async () => {
-    // El controller llama getCurrentPerformance y mapea los campos
-    gradesService.getCurrentPerformance.mockResolvedValue([
-      { subject_code: 'MAT101', subject_name: 'Cálculo', summary: { real_average: 5.5 } }
-    ])
-    const res = await request(app).get('/dashboard/current-progress').set(AUTH)
+  it('200 — service consulta student_subjects y calcula rendimiento por ramo cursando', async () => {
+    // Arrange: 1 ramo cursando, sin categorías (promedio = 0)
+    // from('student_subjects') se llama 2 veces:
+    //   1ª: _getPerformanceByFilter → .select().eq().eq() → array
+    //   2ª: checkSubjectOwnership   → .select().eq().eq().maybeSingle()
+    let ssCallCount = 0
+
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') {
+        ssCallCount++
+        if (ssCallCount === 1) {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                eq: vi.fn().mockResolvedValue({
+                  data: [{
+                    subject_id: 7,
+                    status: 'cursando',
+                    subjects: { name: 'Cálculo', code: 'MAT101' },
+                  }],
+                  error: null,
+                }),
+              }),
+            }),
+          }
+        }
+        return makeOwnershipMock(true)
+      }
+      if (table === 'evaluation_categories') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({ data: [], error: null }),
+            }),
+          }),
+        }
+      }
+    })
+
+    // Act
+    const res = await request(app).get('/dashboard/current-progress').set('Authorization', TOKEN)
+
+    // Assert — controller mapea a {subject_code, subject_name, average}
     expect(res.status).toBe(200)
     expect(res.body).toHaveLength(1)
-    expect(res.body[0]).toMatchObject({ subject_code: 'MAT101', average: 5.5 })
+    expect(res.body[0]).toMatchObject({
+      subject_code: 'MAT101',
+      subject_name: 'Cálculo',
+      average: 0,
+    })
+    expect(mockSb.from).toHaveBeenCalledWith('student_subjects')
+    expect(mockSb.from).toHaveBeenCalledWith('evaluation_categories')
+  })
+
+  it('200 — sin materias cursando: service devuelve [] y el controller responde array vacío', async () => {
+    // Arrange
+    mockSb.from.mockImplementation((table) => {
+      if (table === 'student_subjects') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockResolvedValue({ data: [], error: null }),
+            }),
+          }),
+        }
+      }
+    })
+
+    // Act
+    const res = await request(app).get('/dashboard/current-progress').set('Authorization', TOKEN)
+
+    // Assert
+    expect(res.status).toBe(200)
+    expect(res.body).toHaveLength(0)
   })
 })
