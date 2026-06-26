@@ -1,21 +1,38 @@
 name: Build and Push Grades Service to ACR
 
-# Esto le dice a GitHub que ejecute el robot cada vez que hagas push a la rama 'main'
 on:
   push:
     branches:
       - main
 
 jobs:
-  build-and-push:
+  test:
+    name: Vitest
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Run tests
+        env:
+          SUPABASE_URL: https://placeholder.supabase.co
+          SUPABASE_SERVICE_KEY: placeholder-service-key
+          JWT_SECRET: placeholder-jwt-secret
+          PORT: 3003
+        run: npm test
+
+  build-and-push:
+    name: Build and Push to ACR
+    runs-on: ubuntu-latest
+    needs: test
 
     steps:
-    # 1. El robot "descarga" el código
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # 2. El robot usa los Secretos que creaste para entrar a Azure (South Central US)
     - name: Login to Azure Container Registry
       uses: azure/docker-login@v1
       with:
@@ -23,12 +40,10 @@ jobs:
         username: ${{ secrets.ACR_USERNAME }}
         password: ${{ secrets.ACR_PASSWORD }}
 
-    # 3. El robot construye la imagen
     - name: Build Docker Image
       run: |
         docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/ms-grades-service:${{ github.sha }} -t ${{ secrets.ACR_LOGIN_SERVER }}/ms-grades-service:latest .
 
-    # 4. El robot empuja la imagen a Azure Container Registry
     - name: Push Docker Image to ACR
       run: |
         docker push ${{ secrets.ACR_LOGIN_SERVER }}/ms-grades-service:${{ github.sha }}
