@@ -26,7 +26,7 @@ jobs:
       - name: Run tests
         env:
           SUPABASE_URL: https://placeholder.supabase.co
-          SUPABASE_SERVICE_KEY: placeholder-service-key
+          SUPABASE_SERVICE_ROLE: placeholder-service-role
           JWT_SECRET: placeholder-jwt-secret
           PORT: 3003
         run: npm test
