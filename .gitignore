@@ -6,3 +6,6 @@ node_modules/
 
 # Logs y otros
 npm-debug.log*
+
+# Coverage
+coverage/
